@@ -27,7 +27,7 @@ This project demonstrates how to use neural networks to perform modular arithmet
 To get started, clone the repository and install the required dependencies:
 
 ```bash
-git clone https://github.com/your-username/modular-arithmetic-neural-networks.git
+git clone https://github.com/sanowl/modular-arithmetic-neural-networks.git
 cd modular-arithmetic-neural-networks
 pip install -r requirements.txt
 ```
