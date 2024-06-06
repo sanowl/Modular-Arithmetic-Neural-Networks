@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import logging
-from datasets import load_dataset, load_metric
+from datasets import load_dataset, Dataset, load_metric
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -50,8 +50,8 @@ def train_model(model, data_loader, epochs=1000, lr=0.005):
         model.train()
         for batch in data_loader:
             optimizer.zero_grad()
-            inputs = batch['input']
-            targets = batch['target']
+            inputs = torch.tensor(batch['input'])
+            targets = torch.tensor(batch['target'])
             outputs = model(inputs)
             loss = criterion(outputs, targets.float())
             loss.backward()
@@ -67,8 +67,8 @@ def evaluate_model(model, data_loader):
     accuracy_metric = load_metric('accuracy')
     with torch.no_grad():
         for batch in data_loader:
-            inputs = batch['input']
-            targets = batch['target']
+            inputs = torch.tensor(batch['input'])
+            targets = torch.tensor(batch['target'])
             outputs = model(inputs)
             predicted = torch.argmax(outputs, dim=1)
             accuracy_metric.add_batch(predictions=predicted, references=targets)
@@ -82,17 +82,24 @@ def preprocess_dataset(dataset, p, task):
     targets = []
     for sample in dataset:
         question = sample['question']
-        parts = question.split(' ')
-        n1 = int(parts[2])
-        n2 = int(parts[4])
-        if task == 'addition' and parts[1] == '+':
-            result = (n1 + n2) % p
-        elif task == 'multiplication' and parts[1] == '*':
-            result = (n1 * n2) % p
-        else:
+        parts = question.split()
+        if len(parts) != 5:
+            continue  # Skip if the question format is unexpected
+        try:
+            n1 = int(float(parts[2]))  # Handle both int and float by converting to float first
+            n2 = int(float(parts[4]))  # Handle both int and float by converting to float first
+            if task == 'addition' and parts[1] == '+':
+                result = (n1 + n2) % p
+            elif task == 'multiplication' and parts[1] == '*':
+                result = (n1 * n2) % p
+            else:
+                continue
+            inputs.append([n1, n2])
+            targets.append(result)
+        except (IndexError, ValueError):
+            # Skip any samples that do not fit the expected format or have invalid numbers
             continue
-        inputs.append([n1, n2])
-        targets.append(result)
+    logger.info(f'Preprocessed dataset with {len(inputs)} samples for task {task}')
     return Dataset.from_dict({'input': inputs, 'target': targets})
 
 def main():
@@ -104,9 +111,13 @@ def main():
     epochs = 1000
 
     # Load and preprocess the dataset
-    raw_dataset = load_dataset('math_dataset', 'arithmetic__add_or_sub')
-    addition_dataset = preprocess_dataset(raw_dataset['train'], p, task='addition')
-    multiplication_dataset = preprocess_dataset(raw_dataset['train'], p, task='multiplication')
+    raw_dataset = load_dataset('math_dataset', 'arithmetic__add_or_sub', split='train', trust_remote_code=True)
+    addition_dataset = preprocess_dataset(raw_dataset, p, task='addition')
+    multiplication_dataset = preprocess_dataset(raw_dataset, p, task='multiplication')
+
+    if len(addition_dataset) == 0 or len(multiplication_dataset) == 0:
+        logger.error('No valid samples found in the dataset for the specified tasks.')
+        return
 
     addition_data_loader = torch.utils.data.DataLoader(addition_dataset, batch_size=batch_size, shuffle=True)
     multiplication_data_loader = torch.utils.data.DataLoader(multiplication_dataset, batch_size=batch_size, shuffle=True)
