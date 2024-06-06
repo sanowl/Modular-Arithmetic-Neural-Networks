@@ -1,4 +1,3 @@
-A well-structured README file is crucial for any project as it helps users understand the purpose, usage, and setup of the project. Here's a sample README for the "Modular Arithmetic Neural Networks" project:
 
 ---
 
