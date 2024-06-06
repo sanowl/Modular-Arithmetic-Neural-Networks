@@ -3,14 +3,15 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import logging
-from datasets import load_dataset, Dataset, load_metric
+from datasets import Dataset, load_metric
+from typing import Dict, List
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ModularArithmeticNet(nn.Module):
-    def __init__(self, p, width, task='addition'):
+    def __init__(self, p: int, width: int, task: str = 'addition'):
         super(ModularArithmeticNet, self).__init__()
         self.p = p
         self.width = width
@@ -34,41 +35,48 @@ class ModularArithmeticNet(nn.Module):
                     self.W[:, k] = torch.cos(-2 * np.pi / (self.p - 1) * k * torch.arange(self.p))
     
     def forward(self, x):
-        x1 = torch.eye(self.p)[x[:, 0]]
-        x2 = torch.eye(self.p)[x[:, 1]]
+        x1 = torch.eye(self.p, device=x.device)[x[:, 0]]
+        x2 = torch.eye(self.p, device=x.device)[x[:, 1]]
         x1 = torch.matmul(x1, self.U1.T)
         x2 = torch.matmul(x2, self.U2.T)
         x = torch.pow(x1 + x2, 2)
         x = torch.matmul(x, self.W.T)
         return x
 
-def train_model(model, data_loader, epochs=1000, lr=0.005):
-    criterion = nn.MSELoss()
+def train_model(model: nn.Module, data_loader: torch.utils.data.DataLoader, epochs: int = 1000, lr: float = 0.005, device: torch.device = torch.device('cpu')):
+    criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
+    model.to(device)
     
     for epoch in range(epochs):
         model.train()
+        epoch_loss = 0
         for batch in data_loader:
+            inputs = torch.tensor(batch['input'], dtype=torch.long, device=device)
+            targets = torch.tensor(batch['target'], dtype=torch.long, device=device)
+            
             optimizer.zero_grad()
-            inputs = torch.tensor(batch['input'])
-            targets = torch.tensor(batch['target'])
             outputs = model(inputs)
-            loss = criterion(outputs, targets.float())
+            loss = criterion(outputs, targets)
             loss.backward()
             optimizer.step()
+            epoch_loss += loss.item()
         
         if epoch % 100 == 0:
-            logger.info(f'Epoch {epoch}, Loss: {loss.item()}')
+            logger.info(f'Epoch {epoch}, Loss: {epoch_loss / len(data_loader)}')
     
     logger.info('Training completed.')
 
-def evaluate_model(model, data_loader):
+def evaluate_model(model: nn.Module, data_loader: torch.utils.data.DataLoader, device: torch.device = torch.device('cpu')):
     model.eval()
     accuracy_metric = load_metric('accuracy')
+    model.to(device)
+    
     with torch.no_grad():
         for batch in data_loader:
-            inputs = torch.tensor(batch['input'])
-            targets = torch.tensor(batch['target'])
+            inputs = torch.tensor(batch['input'], dtype=torch.long, device=device)
+            targets = torch.tensor(batch['target'], dtype=torch.long, device=device)
+            
             outputs = model(inputs)
             predicted = torch.argmax(outputs, dim=1)
             accuracy_metric.add_batch(predictions=predicted, references=targets)
@@ -77,62 +85,55 @@ def evaluate_model(model, data_loader):
     logger.info(f'Accuracy: {accuracy["accuracy"] * 100}%')
     return accuracy["accuracy"]
 
-def preprocess_dataset(dataset, p, task):
+def generate_synthetic_dataset(num_samples: int = 1000, p: int = 23, task: str = 'addition') -> Dataset:
     inputs = []
     targets = []
-    for sample in dataset:
-        question = sample['question']
-        parts = question.split()
-        if len(parts) != 5:
-            continue  # Skip if the question format is unexpected
-        try:
-            n1 = int(float(parts[2]))  # Handle both int and float by converting to float first
-            n2 = int(float(parts[4]))  # Handle both int and float by converting to float first
-            if task == 'addition' and parts[1] == '+':
-                result = (n1 + n2) % p
-            elif task == 'multiplication' and parts[1] == '*':
-                result = (n1 * n2) % p
-            else:
-                continue
-            inputs.append([n1, n2])
-            targets.append(result)
-        except (IndexError, ValueError):
-            # Skip any samples that do not fit the expected format or have invalid numbers
-            continue
-    logger.info(f'Preprocessed dataset with {len(inputs)} samples for task {task}')
+    for _ in range(num_samples):
+        n1 = np.random.randint(0, p)
+        n2 = np.random.randint(0, p)
+        if task == 'addition':
+            result = (n1 + n2) % p
+        elif task == 'multiplication':
+            result = (n1 * n2) % p
+        inputs.append([n1, n2])
+        targets.append(result)
     return Dataset.from_dict({'input': inputs, 'target': targets})
+
+def create_data_loader(dataset: Dataset, batch_size: int) -> torch.utils.data.DataLoader:
+    def collate_fn(batch: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor]:
+        return {key: torch.tensor([d[key] for d in batch]) for key in batch[0]}
+    
+    return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
 def main():
     logger.info('Starting main function')
     # Parameters
     p = 23
     width = 128
+    num_samples = 1000
     batch_size = 32
     epochs = 1000
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Load and preprocess the dataset
-    raw_dataset = load_dataset('math_dataset', 'arithmetic__add_or_sub', split='train', trust_remote_code=True)
-    addition_dataset = preprocess_dataset(raw_dataset, p, task='addition')
-    multiplication_dataset = preprocess_dataset(raw_dataset, p, task='multiplication')
+    # Generate synthetic datasets
+    addition_dataset = generate_synthetic_dataset(num_samples, p, task='addition')
+    multiplication_dataset = generate_synthetic_dataset(num_samples, p, task='multiplication')
 
-    if len(addition_dataset) == 0 or len(multiplication_dataset) == 0:
-        logger.error('No valid samples found in the dataset for the specified tasks.')
-        return
-
-    addition_data_loader = torch.utils.data.DataLoader(addition_dataset, batch_size=batch_size, shuffle=True)
-    multiplication_data_loader = torch.utils.data.DataLoader(multiplication_dataset, batch_size=batch_size, shuffle=True)
+    # DataLoader
+    addition_data_loader = create_data_loader(addition_dataset, batch_size)
+    multiplication_data_loader = create_data_loader(multiplication_dataset, batch_size)
 
     logger.info('Initializing and training model for addition')
     # Initialize and train model for addition
     addition_model = ModularArithmeticNet(p, width, task='addition')
-    train_model(addition_model, addition_data_loader, epochs=epochs)
-    evaluate_model(addition_model, addition_data_loader)
+    train_model(addition_model, addition_data_loader, epochs=epochs, device=device)
+    evaluate_model(addition_model, addition_data_loader, device=device)
 
     logger.info('Initializing and training model for multiplication')
     # Initialize and train model for multiplication
     multiplication_model = ModularArithmeticNet(p, width, task='multiplication')
-    train_model(multiplication_model, multiplication_data_loader, epochs=epochs)
-    evaluate_model(multiplication_model, multiplication_data_loader)
+    train_model(multiplication_model, multiplication_data_loader, epochs=epochs, device=device)
+    evaluate_model(multiplication_model, multiplication_data_loader, device=device)
 
     logger.info('Main function completed')
 
